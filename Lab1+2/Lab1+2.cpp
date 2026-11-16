@@ -1,4 +1,3 @@
-#define NOMINMAX
 #include <iostream>
 #include <fstream>
 #include <string>
@@ -9,19 +8,38 @@
 #include <sstream>
 #include <algorithm>
 #include <cctype>
-#include <cstdint>
+//#include <cstdint>
 #include <windows.h>
+#include <cmath>
+#include <iomanip>
+//#include <set>
 
 using namespace std;
 
 struct ArticolVector {
     string numeFisier;
+    string clasa;
+    bool esteTraining;
     map<int, int> vectorFrecvente;
 };
 
 unordered_set<string> stopWords;
 map<string, int> dictionarGlobal;
 vector<ArticolVector> vectoriArticole;
+
+struct InformatiiArticol {
+    string clasa;
+    bool esteTraining;
+};
+
+map<string, InformatiiArticol> informatiiArticole;
+
+map<int, double> castigInformational;
+map<int, int> dictionarSelectat;
+
+const int NUMAR_ATRIBUTE_SELECTATE = 100;
+
+
 
 void incarcaStopWords(const string& caleFisier) {
     ifstream file(caleFisier);
@@ -146,12 +164,56 @@ vector<string> extrageRadacini(const string& text) {
     return radacini;
 }
 
+string extrageClasa(const string& continut) {
+
+    size_t pozitieTopics = continut.find("bip:topics:1.0");
+
+    if (pozitieTopics == string::npos) {
+        return "necunoscut";
+    }
+
+    size_t inceput = continut.find("<code code=\"", pozitieTopics);
+
+    if (inceput == string::npos) {
+        return "necunoscut";
+    }
+
+    inceput += 12;
+
+    size_t sfarsit = continut.find("\"", inceput);
+
+    if (sfarsit == string::npos) {
+        return "necunoscut";
+    }
+
+    return continut.substr(inceput, sfarsit - inceput);
+}
+
 void proceseazaFisierXML(const string& caleXml, const string& folderDestinatie, const string& numeFisier) {
     ifstream fileIn(caleXml);
     if (!fileIn.is_open()) return;
 
     string continut((istreambuf_iterator<char>(fileIn)), istreambuf_iterator<char>());
     fileIn.close();
+
+    string clasa = extrageClasa(continut);
+
+    bool esteTraining =
+        caleXml.find("Training") != string::npos;
+
+    string numeTxt =
+        getNumeFisierFaraExtensie(numeFisier) + ".txt";
+
+    string caleTxtArticol = folderDestinatie + "\\" + numeTxt;
+
+    informatiiArticole[caleTxtArticol] = {
+        clasa,
+        esteTraining
+    };
+    cout << "XML: " << numeFisier
+        << " | Clasa: " << clasa
+        << " | Training: " << esteTraining
+        << endl;
 
     string titluBrut = extrageEticheta(continut, "title");
     string textBrut = extrageEticheta(continut, "text");
@@ -224,10 +286,15 @@ void adaugaInDictionarGlobal(const string& caleTxt) {
 }
 
 void genereazaVectorArticol(const string& caleTxt, const string& numeFisier) {
+
     ifstream file(caleTxt);
     if (!file.is_open()) return;
 
-    string continut((istreambuf_iterator<char>(file)), istreambuf_iterator<char>());
+    string continut(
+        (istreambuf_iterator<char>(file)),
+        istreambuf_iterator<char>()
+    );
+
     file.close();
 
     vector<string> radacini = extrageRadacini(continut);
@@ -240,12 +307,33 @@ void genereazaVectorArticol(const string& caleTxt, const string& numeFisier) {
     ArticolVector artVec;
     artVec.numeFisier = numeFisier;
 
+    auto itInfo = informatiiArticole.find(caleTxt);
+
+    if (itInfo != informatiiArticole.end()) {
+        artVec.clasa = itInfo->second.clasa;
+        artVec.esteTraining = itInfo->second.esteTraining;
+    }
+    else {
+        artVec.clasa = "necunoscut";
+
+        artVec.esteTraining =
+            caleTxt.find("rezultat_training") != string::npos;
+    }
+
     for (const auto& pair : frecventeLocale) {
+
         if (dictionarGlobal.find(pair.first) != dictionarGlobal.end()) {
+
             int index = dictionarGlobal[pair.first];
+
             artVec.vectorFrecvente[index] = pair.second;
         }
     }
+
+    cout << "Articol: " << numeFisier
+        << " | Clasa: " << artVec.clasa
+        << " | Training: " << artVec.esteTraining
+        << endl;
 
     vectoriArticole.push_back(artVec);
 }
@@ -286,6 +374,257 @@ void parcurgeTxt(const string& folder, bool doDictionar) {
     FindClose(hFind);
 }
 
+double calculeazaEntropie(
+    const map<string, int>& distributie
+) {
+    int total = 0;
+
+    for (const auto& p : distributie) {
+        total += p.second;
+    }
+
+    if (total == 0) {
+        return 0;
+    }
+
+    double entropie = 0;
+
+    for (const auto& p : distributie) {
+        double probabilitate =
+            (double)p.second / total;
+
+        if (probabilitate > 0) {
+            entropie -=
+                probabilitate * log2(probabilitate);
+        }
+    }
+
+    return entropie;
+}
+
+void calculeazaInformationGain() {
+
+    castigInformational.clear();
+
+    int total = 0;
+
+    map<string, int> claseGlobale;
+
+    for (const auto& articol : vectoriArticole) {
+
+        if (!articol.esteTraining) {
+            continue;
+        }
+
+        if (articol.clasa == "necunoscut") {
+            continue;
+        }
+
+        claseGlobale[articol.clasa]++;
+        total++;
+    }
+
+    if (total == 0) {
+        cout << "Eroare: Nu exista articole Training cu clase valide!\n";
+        return;
+    }
+
+    double entropieGlobala =
+        calculeazaEntropie(claseGlobale);
+
+    for (const auto& atribut : dictionarGlobal) {
+
+        int index = atribut.second;
+
+        map<string, int> clasePrezent;
+        map<string, int> claseAbsent;
+
+        int prezent = 0;
+        int absent = 0;
+
+        for (const auto& articol : vectoriArticole) {
+
+            if (!articol.esteTraining) {
+                continue;
+            }
+
+            if (articol.clasa == "necunoscut") {
+                continue;
+            }
+
+            if (articol.vectorFrecvente.count(index)) {
+
+                clasePrezent[articol.clasa]++;
+                prezent++;
+            }
+            else {
+
+                claseAbsent[articol.clasa]++;
+                absent++;
+            }
+        }
+
+        double IG = entropieGlobala;
+
+        IG -= ((double)prezent / total) *
+            calculeazaEntropie(clasePrezent);
+
+        IG -= ((double)absent / total) *
+            calculeazaEntropie(claseAbsent);
+
+        castigInformational[index] = IG;
+    }
+
+    cout << "Information Gain calculat folosind "
+        << total
+        << " articole din Training.\n";
+}
+
+void selecteazaAtribute() {
+
+    vector<pair<int, double>> atribute(
+        castigInformational.begin(),
+        castigInformational.end()
+    );
+
+    sort(
+        atribute.begin(),
+        atribute.end(),
+        [](const auto& a, const auto& b) {
+            if (a.second != b.second) {
+                return a.second > b.second;
+            }
+            return a.first < b.first;
+        }
+    );
+
+    dictionarSelectat.clear();
+
+    int limita = min(
+        NUMAR_ATRIBUTE_SELECTATE,
+        (int)atribute.size()
+    );
+
+    for (int i = 0; i < limita; i++) {
+        int indexVechi = atribute[i].first;
+        int indexNou = i + 1;
+
+        dictionarSelectat[indexVechi] = indexNou;
+    }
+}
+
+void salveazaInformationGain() {
+
+    ofstream file("atribute_ig.txt");
+
+    if (!file.is_open()) {
+        cout << "Eroare la crearea fisierului!\n";
+        return;
+    }
+
+    file << fixed << setprecision(6);
+  
+    for (int index = 0; index < (int)dictionarGlobal.size(); index++) {
+
+        file << "@attribute "
+            << index
+            << " "
+            << castigInformational[index]
+            << "\n";
+    }
+
+    file << "\n@data\n";
+
+    for (const auto& articol : vectoriArticole) {
+        for (const auto& p : articol.vectorFrecvente) {
+
+            file << p.first
+                << ":"
+                << p.second
+                << " ";
+        }
+
+        file << "# "
+            << articol.clasa
+            << " # "
+            << (articol.esteTraining ? "train" : "test")
+            << "\n";
+    }
+
+    file.close();
+
+    cout << "Fisierul a fost generat.\n";
+}
+
+void salveazaVectoriSelectati(
+    const string& numeFisier,
+    bool pentruTraining
+) {
+
+    ofstream file(numeFisier);
+
+    if (!file.is_open()) {
+        cout << "Eroare la crearea fisierului: "
+            << numeFisier << "\n";
+        return;
+    }
+
+    file << fixed << setprecision(6);
+
+    map<int, int> indexNouLaVechi;
+
+    for (const auto& p : dictionarSelectat) {
+        indexNouLaVechi[p.second] = p.first;
+    }
+
+    for (const auto& p : indexNouLaVechi) {
+
+        int indexNou = p.first;
+        int indexVechi = p.second;
+
+        file << "@attribute "
+            << indexNou
+            << " "
+            << castigInformational[indexVechi]
+            << "\n";
+    }
+
+    file << "\n@data\n";
+
+    for (const auto& articol : vectoriArticole) {
+
+        if (articol.esteTraining != pentruTraining) {
+            continue;
+        }
+
+        map<int, int> vectorNou;
+
+        for (const auto& p : articol.vectorFrecvente) {
+            int indexVechi = p.first;
+
+            auto it = dictionarSelectat.find(indexVechi);
+
+            if (it != dictionarSelectat.end()) {
+                int indexNou = it->second;
+
+                vectorNou[indexNou] = p.second;
+            }
+        }
+
+        for (const auto& p : vectorNou) {
+
+            file << p.first
+                << ":"
+                << p.second
+                << " ";
+        }
+        file << "# " << articol.clasa << "\n";
+    }
+    file.close();
+    cout << "Fisier generat: "
+        << numeFisier << "\n";
+}
+
 int main() {
     incarcaStopWords("stopwords.txt");
     if (stopWords.empty()) {
@@ -323,6 +662,27 @@ int main() {
         fileVectori << "\n";
     }
     fileVectori.close();
+
     cout << ">> Vectorii au fost salvati in 'vectori_articole.txt'.\n\n";
+
+    cout << "\n===== LABORATOR 3 =====\n";
+
+    calculeazaInformationGain();
+
+    salveazaInformationGain();
+
+    selecteazaAtribute();
+
+    salveazaVectoriSelectati(
+        "vectori_training_selectati.txt",
+        true
+    );
+
+    salveazaVectoriSelectati(
+        "vectori_testing_selectati.txt",
+        false
+    );
+
+    cout << "\nLaboratorul 3 a fost finalizat!\n";
     return 0;
 }
